@@ -3,8 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="旅費入力">
+<meta name="robots" content="noindex, nofollow">
 <title>旅費入力</title>
-<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
 <style>
   :root {
     --bg: #f4f5f7;
@@ -29,7 +31,7 @@
     line-height: 1.5;
     -webkit-text-size-adjust: 100%;
   }
-  main { max-width: 520px; margin: 0 auto; padding: 12px 16px 120px; }
+  main { max-width: 520px; margin: 0 auto; padding: calc(12px + env(safe-area-inset-top)) 16px 120px; }
   h1 { font-size: 18px; margin: 4px 0 12px; }
   h2 { font-size: 14px; color: var(--sub); font-weight: 600; margin: 20px 0 8px; }
   .card {
@@ -60,7 +62,6 @@
   }
   .other { margin-top: 6px; }
   .hidden { display: none !important; }
-  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
   .yen { position: relative; }
   .yen::before { content: "¥"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--sub); }
   .yen input { padding-left: 28px; }
@@ -101,8 +102,8 @@
 
   .msg { margin: 12px 0; padding: 10px 12px; border-radius: 10px; font-size: 14px; }
   .msg.error { background: #ffebe9; color: var(--error); }
-  .msg.info { background: #ddf4ff; color: #0550ae; }
   .status { color: var(--sub); font-size: 13px; margin: 0 0 8px; }
+  .note { color: var(--sub); font-size: 13px; margin: 8px 0 0; }
 
   table.confirm { width: 100%; border-collapse: collapse; font-size: 16px; }
   table.confirm th { text-align: left; color: var(--sub); font-weight: 400; padding: 8px 8px 8px 0; width: 7em; vertical-align: top; }
@@ -111,6 +112,7 @@
 
   .center { text-align: center; padding: 40px 0; color: var(--sub); }
   .done { font-size: 18px; font-weight: 700; color: var(--accent-dark); }
+  .linkish { background: none; border: none; color: var(--sub); font-size: 13px; text-decoration: underline; padding: 16px 0 0; }
 </style>
 </head>
 <body>
@@ -121,6 +123,15 @@
 
   <!-- 読み込み中 -->
   <section id="loading" class="center">読み込み中…</section>
+
+  <!-- 合言葉の入力（初回・合言葉が違ったとき） -->
+  <section id="keyView" class="hidden">
+    <div class="card">
+      <label for="keyInput">合言葉</label>
+      <input id="keyInput" type="password" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <p class="note">この端末に記憶するので、入力は最初の1回だけです。</p>
+    </div>
+  </section>
 
   <!-- 入力画面 -->
   <section id="formView" class="hidden">
@@ -154,6 +165,7 @@
       <label for="client">用務関係社</label>
       <select id="client"></select>
     </div>
+    <button id="forgetKey" class="linkish" type="button">この端末の合言葉を消す</button>
   </section>
 
   <!-- 確認画面 -->
@@ -164,7 +176,7 @@
     <p class="status" style="margin-top:12px">この内容で旅費リストに登録します。</p>
   </section>
 
-  <!-- 完了画面（試験モード、または画面を閉じられなかったとき） -->
+  <!-- 完了画面 -->
   <section id="doneView" class="hidden center">
     <p class="done">登録しました</p>
     <p id="doneText"></p>
@@ -172,7 +184,10 @@
 </main>
 
 <div class="bar">
-  <div class="inner" id="barForm">
+  <div class="inner hidden" id="barKey">
+    <button id="saveKey" class="primary">合言葉を保存</button>
+  </div>
+  <div class="inner hidden" id="barForm">
     <button id="toConfirm" class="primary" disabled>登録</button>
   </div>
   <div class="inner hidden" id="barConfirm">
@@ -187,21 +202,20 @@
 <script>
 /* ========== 設定（ここだけ書き換える） ========== */
 const CONFIG = {
-  GAS_URL: 'https://script.google.com/macros/s/AKfycbw7WASx3q3UC-6unuCWiNly-PbF3h3F3mv13B45PSRZDoO37Qz7IJvPi3IOpbqwuW7Y/exec',
-  LIFF_ID: '',            // 手順3で発行されるLIFF ID。空のあいだは試験モード
+  GAS_URL: 'ここにGASのウェブアプリURL（…/exec）を貼る',
   GEO_TIMEOUT_MS: 6000,   // 現在地の取得を待つ時間
 };
 
 /* ========== 状態 ========== */
 const OTHER = '__other__';
 const NONE = '';
+const KEY_STORE = 'travelKey';
 const state = {
-  test: true,
-  idToken: '',
+  key: '',
   here: null,       // {lat, lng}
   data: null,       // GASから受け取った候補
-  today: '',
   sending: false,
+  bound: false,
 };
 
 const $ = id => document.getElementById(id);
@@ -210,34 +224,27 @@ const $ = id => document.getElementById(id);
 window.addEventListener('DOMContentLoaded', start);
 
 async function start() {
-  const qs = new URLSearchParams(location.search);
-  state.test = !CONFIG.LIFF_ID || qs.get('test') === '1';
+  bindEvents();
+  state.key = loadKey();
+  if (!state.key) { showKeyView(); return; }
+  await boot();
+}
+
+async function boot() {
   try {
-    if (!state.test) {
-      await liff.init({ liffId: CONFIG.LIFF_ID });
-      if (!liff.isLoggedIn()) { liff.login(); return; }
-      state.idToken = liff.getIDToken() || '';
-    }
+    const qs = new URLSearchParams(location.search);
     // 試験用：URLに ?lat=..&lng=.. を付けると、その場所にいることにする
     if (qs.get('lat') && qs.get('lng')) {
       state.here = { lat: Number(qs.get('lat')), lng: Number(qs.get('lng')) };
     } else {
+      showOnly('loading');
       state.here = await getHere();
     }
-    setStatus();
+    $('status').textContent = state.here ? '現在地を取得しました' : '現在地なし（よく使う順で表示）';
     await loadCandidates('');
-    bindEvents();
   } catch (e) {
-    showError('起動できませんでした：' + e.message);
-    hide('loading');
+    handleError(e, '読み込めませんでした');
   }
-}
-
-function setStatus() {
-  const parts = [];
-  if (state.test) parts.push('試験モード');
-  parts.push(state.here ? '現在地を取得しました' : '現在地なし（よく使う順で表示）');
-  $('status').textContent = parts.join('・');
 }
 
 function getHere() {
@@ -251,45 +258,79 @@ function getHere() {
   });
 }
 
-/* ========== GASとの通信 ========== */
-async function callGet(params) {
-  const url = new URL(CONFIG.GAS_URL);
-  Object.keys(params).forEach(k => { if (params[k] !== '' && params[k] !== null && params[k] !== undefined) url.searchParams.set(k, params[k]); });
-  const res = await fetch(url.toString(), { method: 'GET' });
-  const json = await res.json();
-  if (!json.ok) throw new Error(json.error || '不明なエラー');
-  return json.data;
+/* ========== 合言葉 ========== */
+function loadKey() {
+  try { return localStorage.getItem(KEY_STORE) || ''; } catch (e) { return ''; }
+}
+function storeKey(k) {
+  try { localStorage.setItem(KEY_STORE, k); } catch (e) { /* 記憶できない環境では毎回入力 */ }
+}
+function forgetKey() {
+  try { localStorage.removeItem(KEY_STORE); } catch (e) { /* 無視 */ }
+  state.key = '';
 }
 
-async function callPost(body) {
+function showKeyView(message) {
+  $('status').textContent = '';
+  if (message) showError(message); else clearError();
+  showOnly('keyView');
+  showBar('barKey');
+  $('keyInput').value = '';
+  setTimeout(() => $('keyInput').focus(), 50);
+}
+
+async function saveKey() {
+  const k = $('keyInput').value.trim();
+  if (!k) { showError('合言葉を入力してください'); return; }
+  state.key = k;
+  storeKey(k);
+  clearError();
+  await boot();
+}
+
+/* ========== GASとの通信（合言葉がURLに残らないよう、すべてPOST） ========== */
+async function call(body) {
   const res = await fetch(CONFIG.GAS_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(body),
+    body: JSON.stringify(Object.assign({ key: state.key }, body)),
   });
   const json = await res.json();
-  if (!json.ok) throw new Error(json.error || '不明なエラー');
+  if (!json.ok) {
+    const err = new Error(json.error || '不明なエラー');
+    err.auth = !!json.auth;
+    throw err;
+  }
   return json.data;
 }
 
 async function loadCandidates(dateKey) {
   clearError();
-  show('loading'); hide('formView');
-  const data = await callGet({
+  showOnly('loading');
+  const data = await call({
     action: 'candidates',
     date: dateKey,
     lat: state.here ? state.here.lat : '',
     lng: state.here ? state.here.lng : '',
-    idToken: state.idToken,
   });
   state.data = data;
-  state.today = data.today;
   $('date').value = data.date;
   renderRecs();
   renderItems('');
   renderClients();
+  showOnly('formView');
+  showBar('barForm');
   updateButton();
-  hide('loading'); show('formView');
+}
+
+function handleError(e, prefix) {
+  if (e.auth) {
+    forgetKey();
+    showKeyView(e.message);
+    return;
+  }
+  showError(prefix + '：' + e.message);
+  if (!state.data) showOnly(null);
 }
 
 /* ========== 画面の組み立て ========== */
@@ -317,7 +358,7 @@ function renderRecs() {
 }
 
 function applyRec(r, btn) {
-  document.querySelectorAll('.rec').forEach(x => x.classList.remove('selected'));
+  unselectRecs();
   btn.classList.add('selected');
   renderItems(r.item);
   renderFrom(r.from);
@@ -339,14 +380,12 @@ function onItemChange(clearRec) {
   renderFrom(null);
 }
 
-/** 場所①：選んだ項目で使ったことのあるもの。今いる場所から近い順（1km以内は回数順） */
+/** 場所①：選んだ項目で使ったことのあるもの。今いる場所から近い順（同じ距離の段階なら回数順） */
 function renderFrom(selected) {
-  const item = currentItem();
-  const rows = choicesOf(item);
+  const rows = choicesOf(currentItem());
   const sums = {};
   rows.forEach(c => { sums[c.from] = (sums[c.from] || 0) + c.count; });
-  let names = Object.keys(sums);
-  names.sort((a, b) => (distTier(a) - distTier(b)) || (sums[b] - sums[a]));
+  const names = Object.keys(sums).sort((a, b) => (distTier(a) - distTier(b)) || (sums[b] - sums[a]));
   const opts = names.map(n => ({ value: n, label: n === NONE ? '（なし）' : n }));
   const allEmpty = rows.length > 0 && rows.every(c => !c.from && !c.to);
   $('placeBlock').classList.toggle('hidden', allEmpty);
@@ -357,9 +396,8 @@ function renderFrom(selected) {
 
 /** 場所②：選んだ項目＋場所①で使ったことのあるものを回数順 */
 function renderTo(selected) {
-  const item = currentItem();
   const from = currentFrom();
-  const rows = choicesOf(item).filter(c => c.from === from);
+  const rows = choicesOf(currentItem()).filter(c => c.from === from);
   const sums = {};
   rows.forEach(c => { sums[c.to] = (sums[c.to] || 0) + c.count; });
   const names = Object.keys(sums).sort((a, b) => sums[b] - sums[a]);
@@ -394,7 +432,7 @@ function pick(id) {
 }
 
 function choicesOf(item) {
-  return (state.data.choices || []).filter(c => c.item === item);
+  return ((state.data && state.data.choices) || []).filter(c => c.item === item);
 }
 
 function distTier(name) {
@@ -409,11 +447,12 @@ function distTier(name) {
 }
 
 function readForm() {
+  const noPlace = $('placeBlock').classList.contains('hidden');
   return {
     date: $('date').value,
     item: currentItem(),
-    from: $('placeBlock').classList.contains('hidden') ? '' : currentFrom(),
-    to: $('placeBlock').classList.contains('hidden') ? '' : currentTo(),
+    from: noPlace ? '' : currentFrom(),
+    to: noPlace ? '' : currentTo(),
     amount: $('amount').value === '' ? '' : Number($('amount').value),
     client: $('client').value,
   };
@@ -428,13 +467,20 @@ function formProblem(f) {
 }
 
 function updateButton() {
+  if (!state.data) return;
   $('toConfirm').disabled = !!formProblem(readForm());
 }
 
 /* ========== イベント ========== */
 function bindEvents() {
+  if (state.bound) return;
+  state.bound = true;
+  $('saveKey').addEventListener('click', saveKey);
+  $('keyInput').addEventListener('keydown', e => { if (e.key === 'Enter') saveKey(); });
+  $('forgetKey').addEventListener('click', () => { forgetKey(); state.data = null; showKeyView(); });
+
   $('date').addEventListener('change', async () => {
-    try { await loadCandidates($('date').value); } catch (e) { showError(e.message); hide('loading'); show('formView'); }
+    try { await loadCandidates($('date').value); } catch (e) { handleError(e, '読み込めませんでした'); if (!e.auth && state.data) { showOnly('formView'); showBar('barForm'); } }
   });
   $('item').addEventListener('change', () => onItemChange(true));
   $('from').addEventListener('change', () => { unselectRecs(); toggleOther('from'); renderTo(null); });
@@ -462,14 +508,14 @@ function toConfirm() {
     ['用務関係社', f.client],
   ];
   $('confirmBody').innerHTML = rows.map(r => '<tr><th>' + r[0] + '</th><td>' + esc(r[1]) + '</td></tr>').join('');
-  hide('formView'); show('confirmView');
-  hide('barForm'); show('barConfirm');
+  showOnly('confirmView');
+  showBar('barConfirm');
   window.scrollTo(0, 0);
 }
 
 function backToForm() {
-  hide('confirmView'); show('formView');
-  hide('barConfirm'); show('barForm');
+  showOnly('formView');
+  showBar('barForm');
 }
 
 async function submit() {
@@ -480,33 +526,24 @@ async function submit() {
   clearError();
   const f = readForm();
   try {
-    const result = await callPost({
+    const result = await call({
       action: 'register',
       date: f.date, item: f.item, from: f.from, to: f.to, amount: f.amount, client: f.client,
       lat: state.here ? state.here.lat : '',
       lng: state.here ? state.here.lng : '',
-      idToken: state.idToken,
     });
     try { localStorage.setItem('lastClient', f.client); } catch (e) { /* 無視 */ }
-    await finish(result);
+    $('doneText').textContent = result.message + '（旅費リスト ' + result.row + '行目）';
+    showOnly('doneView');
+    showBar('barDone');
   } catch (e) {
-    showError('登録できませんでした：' + e.message + '（入力内容は残っています）');
+    if (e.auth) { handleError(e); }
+    else showError('登録できませんでした：' + e.message + '（入力内容は残っています）');
+  } finally {
     $('submit').disabled = false;
     $('submit').textContent = '確定';
     state.sending = false;
   }
-}
-
-async function finish(result) {
-  if (!state.test) {
-    try {
-      if (liff.isInClient()) await liff.sendMessages([{ type: 'text', text: result.message }]);
-    } catch (e) { /* トークに送れなくても登録は済んでいる */ }
-    try { liff.closeWindow(); return; } catch (e) { /* 閉じられなければ完了画面を出す */ }
-  }
-  $('doneText').textContent = result.message + '（旅費リスト ' + result.row + '行目）';
-  hide('confirmView'); show('doneView');
-  hide('barConfirm'); show('barDone');
 }
 
 /* ========== 小道具 ========== */
@@ -549,11 +586,14 @@ function distKm(a, b) {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+const VIEWS = ['loading', 'keyView', 'formView', 'confirmView', 'doneView'];
+const BARS = ['barKey', 'barForm', 'barConfirm', 'barDone'];
+function showOnly(id) { VIEWS.forEach(v => $(v).classList.toggle('hidden', v !== id)); if (!id) BARS.forEach(b => $(b).classList.add('hidden')); }
+function showBar(id) { BARS.forEach(b => $(b).classList.toggle('hidden', b !== id)); }
+
 function isNum(v) { return typeof v === 'number' && isFinite(v); }
 function fmt(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ','); }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function show(id) { $(id).classList.remove('hidden'); }
-function hide(id) { $(id).classList.add('hidden'); }
 function showError(t) { const e = $('error'); e.textContent = t; e.classList.remove('hidden'); window.scrollTo(0, 0); }
 function clearError() { $('error').classList.add('hidden'); }
 </script>

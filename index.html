@@ -62,6 +62,13 @@
   }
   .other { margin-top: 6px; }
   .hidden { display: none !important; }
+  .amountRow { display: flex; gap: 8px; }
+  .amountRow .yen { flex: 1; }
+  .qbtn {
+    flex: 0 0 64px; font-size: 17px; font-weight: 700; border-radius: 10px;
+    border: 1px solid var(--line); background: #fff; color: var(--text);
+  }
+  .qbtn.on { background: #fff4d6; border-color: #e3b341; color: #7a5300; }
   .yen { position: relative; }
   .yen::before { content: "¥"; position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--sub); }
   .yen input { padding-left: 28px; }
@@ -160,10 +167,28 @@
       </div>
 
       <label for="amount">金額</label>
-      <div class="yen"><input id="amount" type="number" inputmode="numeric" pattern="[0-9]*" min="0" step="1" placeholder="0"></div>
+      <div class="amountRow">
+        <div class="yen"><input id="amount" type="number" inputmode="numeric" pattern="[0-9]*" min="0" step="1" placeholder="0"></div>
+        <button id="unknownAmount" class="qbtn" type="button" aria-pressed="false">?</button>
+      </div>
 
       <label for="client">用務関係社</label>
       <select id="client"></select>
+    </div>
+
+    <h2>精算の区分</h2>
+    <div class="card">
+      <label for="fund">原資（J列）</label>
+      <select id="fund"></select>
+
+      <label for="receiptFlag">領収書（F列）</label>
+      <select id="receiptFlag"></select>
+
+      <label for="billFlag">顧問企業への請求可否（H列）</label>
+      <select id="billFlag"></select>
+
+      <label for="receiptType">領収書の種別（O列の備考）</label>
+      <select id="receiptType"></select>
     </div>
     <button id="forgetKey" class="linkish" type="button">この端末の合言葉を消す</button>
   </section>
@@ -202,7 +227,7 @@
 <script>
 /* ========== 設定（ここだけ書き換える） ========== */
 const CONFIG = {
-  GAS_URL: 'https://script.google.com/macros/s/AKfycbw7WASx3q3UC-6unuCWiNly-PbF3h3F3mv13B45PSRZDoO37Qz7IJvPi3IOpbqwuW7Y/exec',
+  GAS_URL: 'ここにGASのウェブアプリURL（…/exec）を貼る',
   GEO_TIMEOUT_MS: 6000,   // 現在地の取得を待つ時間
 };
 
@@ -216,6 +241,8 @@ const state = {
   data: null,       // GASから受け取った候補
   sending: false,
   bound: false,
+  amountUnknown: false,   // 金額「?」
+  fundTouched: false,     // 原資を手で選び直したか
 };
 
 const $ = id => document.getElementById(id);
@@ -318,6 +345,7 @@ async function loadCandidates(dateKey) {
   renderRecs();
   renderItems('');
   renderClients();
+  renderExtras();
   showOnly('formView');
   showBar('barForm');
   updateButton();
@@ -363,6 +391,7 @@ function applyRec(r, btn) {
   renderItems(r.item);
   renderFrom(r.from);
   renderTo(r.to);
+  setAmountUnknown(false);
   $('amount').value = isNum(r.lastAmount) ? r.lastAmount : '';
   updateButton();
   $('client').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -418,8 +447,39 @@ function renderClients() {
 
 function setAmountFromHistory() {
   const hit = choicesOf(currentItem()).find(c => c.from === currentFrom() && c.to === currentTo());
+  setAmountUnknown(false);
   $('amount').value = hit && isNum(hit.lastAmount) ? hit.lastAmount : '';
   updateButton();
+}
+
+/** 精算の区分：F・Hは空欄から選ぶ。原資は用務関係社と同じ会社を初期値にする */
+function renderExtras() {
+  const d = state.data;
+  const blank = [{ value: '', label: '（空欄のまま）' }];
+  fillSelect($('receiptFlag'), blank.concat(d.receiptFlags || []), '', false);
+  fillSelect($('billFlag'), blank.concat(d.billFlags || []), '', false);
+  fillSelect($('receiptType'), blank.concat((d.receiptTypes || []).map(t => ({ value: t, label: t }))), '', false);
+  state.fundTouched = false;
+  syncFund();
+}
+
+function syncFund() {
+  const funds = state.data.funds || [];
+  const client = $('client').value;
+  const current = $('fund').value;
+  const opts = [{ value: '', label: '（空欄のまま）' }].concat(funds.map(f => ({ value: f, label: f })));
+  const selected = state.fundTouched ? current : (funds.indexOf(client) >= 0 ? client : '');
+  fillSelect($('fund'), opts, selected, false);
+}
+
+function setAmountUnknown(on) {
+  state.amountUnknown = on;
+  const b = $('unknownAmount');
+  b.classList.toggle('on', on);
+  b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  $('amount').disabled = on;
+  if (on) $('amount').value = '';
+  $('amount').placeholder = on ? '不明（?で登録）' : '0';
 }
 
 /* ========== 入力値 ========== */
@@ -453,15 +513,19 @@ function readForm() {
     item: currentItem(),
     from: noPlace ? '' : currentFrom(),
     to: noPlace ? '' : currentTo(),
-    amount: $('amount').value === '' ? '' : Number($('amount').value),
+    amount: state.amountUnknown ? '?' : ($('amount').value === '' ? '' : Number($('amount').value)),
     client: $('client').value,
+    fund: $('fund').value,
+    receiptFlag: $('receiptFlag').value,
+    billFlag: $('billFlag').value,
+    receiptType: $('receiptType').value,
   };
 }
 
 function formProblem(f) {
   if (!f.date) return '日付を入れてください';
   if (!f.item) return '項目を選ぶか入力してください';
-  if (f.amount === '' || !Number.isInteger(f.amount) || f.amount < 0) return '金額を入れてください';
+  if (f.amount !== '?' && (f.amount === '' || !Number.isInteger(f.amount) || f.amount < 0)) return '金額を入れるか、［?］を押してください';
   if (!f.client) return '用務関係社を選んでください';
   return '';
 }
@@ -487,7 +551,9 @@ function bindEvents() {
   $('to').addEventListener('change', () => { unselectRecs(); toggleOther('to'); setAmountFromHistory(); });
   ['itemOther', 'fromOther', 'toOther'].forEach(id => $(id).addEventListener('input', updateButton));
   $('amount').addEventListener('input', updateButton);
-  $('client').addEventListener('change', updateButton);
+  $('client').addEventListener('change', () => { syncFund(); updateButton(); });
+  $('fund').addEventListener('change', () => { state.fundTouched = true; });
+  $('unknownAmount').addEventListener('click', () => { setAmountUnknown(!state.amountUnknown); updateButton(); });
 
   $('toConfirm').addEventListener('click', toConfirm);
   $('back').addEventListener('click', backToForm);
@@ -504,8 +570,12 @@ function toConfirm() {
     ['日付', f.date.replace(/-/g, '/')],
     ['項目', f.item],
     ['区間', routeText(f.from, f.to) || '（なし）'],
-    ['金額', '¥' + fmt(f.amount)],
+    ['金額', f.amount === '?' ? '?（不明）' : '¥' + fmt(f.amount)],
     ['用務関係社', f.client],
+    ['原資', f.fund || '（空欄）'],
+    ['領収書', labelOf(state.data.receiptFlags, f.receiptFlag)],
+    ['請求可否', labelOf(state.data.billFlags, f.billFlag)],
+    ['領収書の種別', f.receiptType || '（空欄）'],
   ];
   $('confirmBody').innerHTML = rows.map(r => '<tr><th>' + r[0] + '</th><td>' + esc(r[1]) + '</td></tr>').join('');
   showOnly('confirmView');
@@ -529,6 +599,7 @@ async function submit() {
     const result = await call({
       action: 'register',
       date: f.date, item: f.item, from: f.from, to: f.to, amount: f.amount, client: f.client,
+      fund: f.fund, receiptFlag: f.receiptFlag, billFlag: f.billFlag, receiptType: f.receiptType,
       lat: state.here ? state.here.lat : '',
       lng: state.here ? state.here.lng : '',
     });
@@ -568,6 +639,12 @@ function fillSelect(sel, opts, selected, withOther) {
 function toggleOther(id) {
   $(id + 'Other').classList.toggle('hidden', $(id).value !== OTHER);
   updateButton();
+}
+
+function labelOf(list, value) {
+  if (!value) return '（空欄）';
+  const hit = (list || []).find(o => o.value === value);
+  return hit ? hit.label : value;
 }
 
 function unselectRecs() {
